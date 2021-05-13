@@ -4,7 +4,7 @@ library(reticulate)
 library(quantreg)
 
 # Define model parameters here
-num_filters <- 40
+num_filters <- 20
 kernel_size <- c(19, 19)
 pool_size <- 2
 
@@ -34,6 +34,35 @@ build_W <- function(filters, X) {
     }
   }
   return (list("W" = W, "output_shape" = output_shape))
+}
+
+# Function to build convolutional filters from repaired matrix W
+build_filters <- function(W, filter_shape, X) {
+  model <- keras_model_sequential()
+  model %>% layer_conv_2d(num_filters, kernel_size=kernel_size, input_shape=dim(X)[2:4],
+                          use_bias = FALSE, trainable = FALSE)
+  output_shape <- unlist(model$output_shape)
+  
+  # Build matrix that represents convolutional operation
+  filters <- array(0, dim = filter_shape)
+  nums <- array(0, dim = filter_shape)
+  for (fr in 1:filter_shape[1]) {
+    for (row in 1:output_shape[1]) {
+      for (col in 1:output_shape[2]) {
+        # print(paste(fr, row, col))
+        W_i <- ((fr + row - 2)*dim(X)[3]) + col
+        W_i2 <- W_i + filter_shape[2] - 1
+        W_j <- ((row - 1)*output_shape[2] + col - 1)*output_shape[3] + 1
+        W_j2 <- W_j + filter_shape[4] - 1
+        # print(paste(W_i, W_i2, W_j, W_j2))
+        filters[fr, , 1, ] <- filters[fr, , 1, ] + W[W_i:W_i2, W_j:W_j2]
+        nums[fr, , 1, ] <- nums[fr, , 1, ] + 1
+      }
+    }
+  }
+  
+  filters <- filters / nums
+  return (filters)
 }
 
 # Read a model in given prefix
@@ -69,6 +98,12 @@ run.success <- function(model_name, trials, delta=.025, retrain=TRUE) {
   
   pool_flatten <- keras_model_sequential()
   pool_flatten %>% layer_reshape(output_shape, input_shape = c(dim(W1_0)[2])) %>%
+    layer_average_pooling_2d(pool_size) %>%
+    layer_flatten()
+  
+  repair <- keras_model_sequential()
+  repair %>% layer_conv_2d(num_filters, kernel_size=kernel_size, input_shape=c(28, 28, 1),
+                            use_bias = FALSE, trainable = FALSE) %>%
     layer_average_pooling_2d(pool_size) %>%
     layer_flatten()
   
@@ -114,7 +149,13 @@ run.success <- function(model_name, trials, delta=.025, retrain=TRUE) {
         Q <- rnorm(p_2, mean=1)
         eta <- as.vector(W2)
         out <- X %*% W1.repaired
-        Xtilde <- predict(pool_flatten, out)
+        
+        filters <- build_filters(W1.repaired, dim(W1), X_)
+        set_weights(repair, list(filters))
+        Xtilde <- predict(repair, X_)
+        Xtilde_old <- predict(pool_flatten, out)
+        print(max(abs(Xtilde - Xtilde_old)))
+        
         bata <- data.frame(t(Xtilde))
         bata$eta <- eta + corrupt*Q - as.vector(W2_0)
         fit <- rq(eta ~ 0 + ., data = bata, tau=0.5, method='fn')
@@ -161,6 +202,12 @@ run.error <- function(model_name, trials, delta=.025, retrain=TRUE) {
     layer_average_pooling_2d(pool_size) %>%
     layer_flatten()
   
+  repair <- keras_model_sequential()
+  repair %>% layer_conv_2d(num_filters, kernel_size=kernel_size, input_shape=c(28, 28, 1),
+                           use_bias = FALSE, trainable = FALSE) %>%
+    layer_average_pooling_2d(pool_size) %>%
+    layer_flatten()
+  
   n <- dim(X)[1]
   d <- dim(X)[2]
   p <- dim(W1_0)[2]
@@ -196,7 +243,13 @@ run.error <- function(model_name, trials, delta=.025, retrain=TRUE) {
       Q <- rnorm(p_2, mean=1)
       eta <- as.vector(W2)
       out <- X %*% W1.repaired
-      Xtilde <- predict(pool_flatten, out)
+      
+      filters <- build_filters(W1.repaired, dim(W1), X_)
+      set_weights(repair, list(filters))
+      Xtilde <- predict(repair, X_)
+      Xtilde_old <- predict(pool_flatten, out)
+      print(max(abs(Xtilde - Xtilde_old)))
+      
       bata <- data.frame(t(Xtilde))
       bata$eta <- eta + corrupt*Q - as.vector(W2_0)
       tryCatch({
@@ -271,11 +324,9 @@ weights <- ret$weights
 weights_file <- sprintf("cnn_%d_%d_tanh_weights.RData", num_filters, kernel_size[1])
 save(weights, file = weights_file)
 
-# Run 20 trials
-for (i in 1:20) {
-  successes <- run.success(sprintf("cnn_%d_%d", num_filters, kernel_size[1]), 1, 0.025)
-  save(successes, file = sprintf("successes_cnn_%d_%d_%d.RData", num_filters, kernel_size[1], i))
-  errors <- run.error(sprintf("cnn_%d_%d", num_filters, kernel_size[1]), 1, 0.025)
-  save(errors, file = sprintf("errors_cnn_%d_%d_%d.RData", num_filters, kernel_size[1], i))
+# Run 30 trials
+for (i in 1:30) {
+  successes <- run.success(sprintf("cnn_%d_%d_tanh", num_filters, kernel_size[1]), 1, 0.025)
+  save(successes, file = sprintf("successes_cnn_repaired_%d_%d_%d.RData", num_filters, kernel_size[1], i))
 }
 
